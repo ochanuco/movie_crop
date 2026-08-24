@@ -80,7 +80,7 @@ def main():
     parser.add_argument("input", type=Path)
     parser.add_argument("--scan-interval", type=float, default=1.0)
     parser.add_argument("--gap-threshold", type=float, default=3.0)
-    parser.add_argument("--roi", default="0.65,0.85,0.35,0.15")
+    parser.add_argument("--roi", default="0.0,0.0,0.35,0.15")
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--reencode", action="store_true")
     args = parser.parse_args()
