@@ -13,7 +13,7 @@ TIMESTAMP_RE = re.compile(r"(\d{4})[/\-](\d{2})[/\-](\d{2})\s+(\d{2}):(\d{2}):(\
 def read_timestamp(frame, roi):
     height, width = frame.shape[:2]
     x, y, w, h = roi
-    image = frame[int(height*y):int(height*(y+h)), int(width*x):int(width*(x+w))]
+    image = frame[int(height * y):int(height * (y + h)), int(width * x):int(width * (x + w))]
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -37,61 +37,130 @@ def video_duration(path):
     return frames / fps
 
 
-def find_boundaries(path, roi, interval, threshold):
+def timestamp_at(cap, pts, roi):
+    cap.set(cv2.CAP_PROP_POS_MSEC, pts * 1000)
+    ok, frame = cap.read()
+    if not ok:
+        return None
+    return read_timestamp(frame, roi)
+
+
+def is_gap(previous_pts, previous_time, current_pts, current_time, threshold):
+    if previous_time is None or current_time is None:
+        return False
+    video_delta = current_pts - previous_pts
+    real_delta = (current_time - previous_time).total_seconds()
+    return real_delta - video_delta >= threshold
+
+
+def refine_boundary(cap, roi, start_pts, end_pts, threshold, fine_interval):
+    previous_pts = start_pts
+    previous_time = timestamp_at(cap, previous_pts, roi)
+    pts = start_pts + fine_interval
+
+    while pts <= end_pts + 1e-9:
+        current_time = timestamp_at(cap, pts, roi)
+        if is_gap(previous_pts, previous_time, pts, current_time, threshold):
+            return pts
+        if current_time is not None:
+            previous_pts = pts
+            previous_time = current_time
+        pts += fine_interval
+
+    return end_pts
+
+
+def find_boundaries(path, roi, scan_interval, fine_interval, threshold):
     duration = video_duration(path)
     cap = cv2.VideoCapture(str(path))
     boundaries = [0.0]
-    previous_pts = previous_time = None
-    pts = 0.0
+
+    previous_pts = 0.0
+    previous_time = timestamp_at(cap, previous_pts, roi)
+    pts = scan_interval
 
     while pts < duration:
-        cap.set(cv2.CAP_PROP_POS_MSEC, pts * 1000)
-        ok, frame = cap.read()
-        if ok:
-            timestamp = read_timestamp(frame, roi)
-            if timestamp is not None and previous_time is not None:
-                video_delta = pts - previous_pts
-                real_delta = (timestamp - previous_time).total_seconds()
-                stopped_for = real_delta - video_delta
-                if stopped_for >= threshold:
-                    boundaries.append(pts)
-                    print(f"gap at {pts:.3f}s: recording stopped for about {stopped_for:.1f}s")
-            if timestamp is not None:
-                previous_pts, previous_time = pts, timestamp
-        pts += interval
+        current_time = timestamp_at(cap, pts, roi)
+
+        if is_gap(previous_pts, previous_time, pts, current_time, threshold):
+            boundary = refine_boundary(
+                cap,
+                roi,
+                previous_pts,
+                pts,
+                threshold,
+                fine_interval,
+            )
+            if boundary - boundaries[-1] > fine_interval:
+                boundaries.append(boundary)
+                print(f"gap detected: split at {boundary:.3f}s")
+
+        if current_time is not None:
+            previous_pts = pts
+            previous_time = current_time
+
+        pts += scan_interval
 
     cap.release()
     boundaries.append(duration)
     return boundaries
 
 
-def split_video(path, boundaries, output_dir, reencode):
+def split_video(path, boundaries, output_dir):
     output_dir.mkdir(parents=True, exist_ok=True)
+
     for index, (start, end) in enumerate(zip(boundaries, boundaries[1:]), 1):
         output = output_dir / f"recording_{index:03d}.mp4"
-        command = ["ffmpeg", "-y", "-ss", str(start), "-i", str(path), "-t", str(end-start), "-map", "0"]
-        command += ["-c:v", "libx264", "-c:a", "aac"] if reencode else ["-c", "copy"]
-        subprocess.run(command + [str(output)], check=True)
-        print(f"written: {output}")
+        subprocess.run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{start:.6f}",
+                "-i",
+                str(path),
+                "-t",
+                f"{end - start:.6f}",
+                "-map",
+                "0",
+                "-c",
+                "copy",
+                str(output),
+            ],
+            check=True,
+        )
+        print(f"written: {output} ({start:.3f}s -> {end:.3f}s)")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Split concatenated recordings when the burned-in timestamp jumps forward.")
+    parser = argparse.ArgumentParser(
+        description="Split concatenated recordings when the burned-in timestamp jumps forward."
+    )
     parser.add_argument("input", type=Path)
     parser.add_argument("--scan-interval", type=float, default=1.0)
+    parser.add_argument("--fine-interval", type=float, default=0.1)
     parser.add_argument("--gap-threshold", type=float, default=3.0)
     parser.add_argument("--roi", default="0.0,0.0,0.35,0.15")
     parser.add_argument("--output-dir", type=Path)
-    parser.add_argument("--reencode", action="store_true")
     args = parser.parse_args()
 
     roi = tuple(map(float, args.roi.split(",")))
     if len(roi) != 4:
         parser.error("--roi must be x,y,width,height")
+    if args.scan_interval <= 0 or args.fine_interval <= 0:
+        parser.error("scan intervals must be greater than 0")
+    if args.fine_interval > args.scan_interval:
+        parser.error("--fine-interval must be less than or equal to --scan-interval")
 
     output_dir = args.output_dir or args.input.with_name(f"{args.input.stem}_split")
-    boundaries = find_boundaries(args.input, roi, args.scan_interval, args.gap_threshold)
-    split_video(args.input, boundaries, output_dir, args.reencode)
+    boundaries = find_boundaries(
+        args.input,
+        roi,
+        args.scan_interval,
+        args.fine_interval,
+        args.gap_threshold,
+    )
+    split_video(args.input, boundaries, output_dir)
 
 
 if __name__ == "__main__":
