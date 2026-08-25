@@ -69,6 +69,14 @@ input_split/
 └── recording_003.mp4
 ```
 
+## How it works
+
+1. 1秒ごとに焼き込み日時をOCRして、録画停止による実時間のジャンプを粗く検出します。
+2. ジャンプを検出した区間だけ0.1秒刻みで再スキャンします。
+3. 精密化した境界でFFmpegのstream copyを使ってMP4を分割します。
+
+映像・音声は再エンコードしません。
+
 ## Timestamp ROI
 
 OCR対象はデフォルトで左上付近です。
@@ -100,10 +108,16 @@ python movie_crop.py input.mp4 --roi 0.02,0.02,0.30,0.10
 
 ## Gap detection
 
-デフォルトでは1秒ごとにOCRします。
+粗探索の間隔はデフォルト1秒です。
 
 ```bash
 python movie_crop.py input.mp4 --scan-interval 1
+```
+
+境界付近の再探索間隔はデフォルト0.1秒です。
+
+```bash
+python movie_crop.py input.mp4 --fine-interval 0.1
 ```
 
 動画時間と実時間の差が3秒以上になった場合、録画停止があったと判定します。
@@ -114,28 +128,24 @@ python movie_crop.py input.mp4 --gap-threshold 3
 
 例えば動画上では1秒しか進んでいないのに、焼き込み時計が31秒進んでいれば、およそ30秒間録画が停止していたと判定します。
 
-## Accurate cuts
+## Splitting
 
-通常は高速な stream copy を使用します。
+分割にはFFmpegのstream copyを使用します。
 
-```bash
-python movie_crop.py input.mp4
+```text
+-c copy
 ```
 
-MP4のキーフレーム位置によって分割位置にズレが出る場合は再エンコードできます。
+そのためH.264/H.265等の映像や音声を再エンコードせず、元ストリームをそのまま各MP4へコピーします。画質劣化がなく、再エンコードより高速です。
 
-```bash
-python movie_crop.py input.mp4 --reencode
-```
-
-再エンコードは遅くなりますが、分割位置をより正確にできます。
+ただしstream copyでは、実際の切断位置が入力動画のキーフレーム構造の影響を受ける場合があります。
 
 ## Notes
 
 OCRが失敗したフレームはスキップします。日時表示の背景やフォントによって認識精度が低い場合は、まず `--roi` を日時部分だけに絞るのが有効です。
 
-現在の境界検出精度は `--scan-interval` に依存します。1秒指定の場合、停止・再開位置は概ね1秒単位です。境界をより正確にしたい場合は値を小さくできます。
+粗探索を細かくしすぎると動画全体へのOCR回数が増えるため、通常は `--scan-interval 1` のまま、必要に応じて `--fine-interval` のみ調整してください。
 
 ```bash
-python movie_crop.py input.mp4 --scan-interval 0.25 --reencode
+python movie_crop.py input.mp4 --fine-interval 0.05
 ```
